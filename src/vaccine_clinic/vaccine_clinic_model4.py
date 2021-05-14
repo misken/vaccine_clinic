@@ -53,31 +53,46 @@ def process_command_line(argv=None):
                                      description='Run vaccine clinic simulation')
 
     # Add arguments
-    parser.add_argument("patient_arrival_rate", help="patients per hour",
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Configuration file containing input parameter arguments and values"
+    )
+
+    parser.add_argument("--patient_arrival_rate", default=150, help="patients per hour",
                         type=float)
 
-    parser.add_argument("num_greeters", help="number of greeters",
+    parser.add_argument("--num_greeters", default=2, help="number of greeters",
                         type=int)
 
-    parser.add_argument("num_reg_staff", help="number of registration staff",
+    parser.add_argument("--num_reg_staff", default=2, help="number of registration staff",
                         type=int)
 
-    parser.add_argument("num_vaccinators", help="number of vaccinators",
+    parser.add_argument("--num_vaccinators", default=15, help="number of vaccinators",
                         type=int)
 
-    parser.add_argument("num_schedulers", help="number of schedulers",
+    parser.add_argument("--num_schedulers", default=2, help="number of schedulers",
                         type=int)
-
-    parser.add_argument(
-        "--scenario", type=str, default=datetime.now().strftime("%Y.%m.%d.%H.%M."),
-        help="Prepended to output filenames."
-    )
 
     parser.add_argument("--pct_need_second_dose", default=0.5,
                         help="percent of patients needing 2nd dose (default = 0.5)",
                         type=float)
 
+    parser.add_argument("--obs_time", default=15,
+                        help="Time (minutes) patient waits post-vaccination in observation area (default = 15)",
+                        type=float)
+
+    parser.add_argument(
+        "--scenario", type=str, default=datetime.now().strftime("%Y.%m.%d.%H.%M."),
+        help="Appended to output filenames."
+    )
+
     parser.add_argument("--stoptime", default=600, help="time that simulation stops (default = 600)",
+                        type=float)
+
+    parser.add_argument("--num_reps", default=1, help="number of simulation replications (default = 1)",
+                        type=float)
+
+    parser.add_argument("--seed", default=3, help="random number generator seed (default = 3)",
                         type=float)
 
     parser.add_argument(
@@ -89,6 +104,14 @@ def process_command_line(argv=None):
     # do the parsing
     args = parser.parse_args()
     return args
+
+
+class PatientFlow(object):
+    def __init__(self, mean_interarrival_time, pct_need_second_dose):
+        self.mean_interarrival_time = mean_interarrival_time
+        self.pct_need_second_dose = pct_need_second_dose
+
+
 
 
 class VaccineClinic(object):
@@ -120,7 +143,7 @@ class VaccineClinic(object):
         yield self.env.timeout(rg.normal(4.0, 0.5))
 
     def schedule_dose_2(self, rg):
-        yield self.env.timeout(rg.normal(1.0, 0.25))
+        yield self.env.timeout(rg.normal(1.0, 0.10))
 
     # We assume all patients wait at least 15 minutes post-vaccination
     # Some will choose to wait longer. This is the time beyond 15 minutes
@@ -129,11 +152,14 @@ class VaccineClinic(object):
         yield self.env.timeout(rg.exponential(0.5))
 
 
-# Now create general function to define the sequence of steps traversed by patients.
-# We'll also capture a bunch of timestamps to make it easy to compute various system
-# performance measures such as patient waiting times, queue sizes and resource utilization.
+#
 
-def get_vaccinated(env, patient, clinic, pct_first_dose, rg, quiet):
+def get_vaccinated(env, patient, clinic, patient_flow, rg, quiet):
+    """Defines the sequence of steps traversed by patients.
+
+       Also capture a bunch of timestamps to make it easy to compute various system
+       performance measures such as patient waiting times, queue sizes and resource utilization.
+    """
     # Patient arrives to clinic - note the arrival time
     arrival_ts = env.now
 
@@ -170,7 +196,7 @@ def get_vaccinated(env, patient, clinic, pct_first_dose, rg, quiet):
         clinic.postvac_occupancy_list.append((env.now, clinic.postvac_occupancy_list[-1][1] + 1))
 
     # Request scheduler to schedule second dose if needed
-    if rg.random() < pct_first_dose:
+    if rg.random() < patient_flow.pct_need_second_dose:
         with clinic.scheduler.request() as request:
             yield request
             got_scheduler_ts = env.now
@@ -211,21 +237,33 @@ def get_vaccinated(env, patient, clinic, pct_first_dose, rg, quiet):
     clinic.timestamps_list.append(timestamps)
 
 
-# Now create a function that runs the clinic for a specified number of hours.
-# 
-# TODO: Dealing with the hours of operation and making sure clinic cleared at end of day.
-#  Create clinic level dict of stats such as number of patients vaccinated and end of day timestamp.
-
-
-def run_clinic(env, clinic, mean_interarrival_time, pct_first_dose, rg,
+def run_clinic(env, clinic, patient_flow, rg,
                stoptime=simpy.core.Infinity, max_arrivals=simpy.core.Infinity, quiet=False):
+    """
+    Run the clinic for a specified amount of time.
+
+    Parameters
+    ----------
+    env
+    clinic
+    patient_flow
+    rg
+    stoptime
+    max_arrivals
+    quiet
+
+    Returns
+    -------
+
+    """
+
     # Create a counter to keep track of number of patients generated and to serve as unique patient id
     patient = 0
 
     # Loop for generating patients
     while env.now < stoptime and patient < max_arrivals:
         # Generate next interarrival time (this will be more complicated later)
-        iat = rg.exponential(mean_interarrival_time)
+        iat = rg.exponential(patient_flow.mean_interarrival_time)
 
         # This process will now yield to a 'timeout' event. This process will resume after iat time units.
         yield env.timeout(iat)
@@ -236,12 +274,14 @@ def run_clinic(env, clinic, mean_interarrival_time, pct_first_dose, rg,
         if not quiet:
             print(f"Patient {patient} created at time {env.now}")
 
-        env.process(get_vaccinated(env, patient, clinic, pct_first_dose, rg, quiet))
+        env.process(get_vaccinated(env, patient, clinic, patient_flow, rg, quiet))
 
     print(f"{patient} patients processed.")
 
 
 def compute_durations(timestamp_df):
+    """Compute time durations of interest from timestamps dataframe and append new cols to dataframe"""
+
     timestamp_df['wait_for_greeter'] = timestamp_df.loc[:, 'got_greeter_ts'] - timestamp_df.loc[:, 'arrival_ts']
     timestamp_df['wait_for_reg'] = timestamp_df.loc[:, 'got_reg_ts'] - timestamp_df.loc[:, 'release_greeter_ts']
     timestamp_df['wait_for_vaccinator'] = timestamp_df.loc[:, 'got_vaccinator_ts'] - timestamp_df.loc[:,
@@ -257,22 +297,26 @@ def compute_durations(timestamp_df):
     return timestamp_df
 
 
-def simulate(arg_dict):
+def simulate(arg_dict, rep_num):
 
     patient_arrival_rate = arg_dict['patient_arrival_rate']
     mean_interarrival_time = 1.0 / (patient_arrival_rate / 60.0)
     pct_need_second_dose = arg_dict['pct_need_second_dose']
 
-    # Create a random number generator
-    rg = default_rng(seed=4470)
+    # Create a PatientFlow object to store patient flow related parameters
+    patient_flow = PatientFlow(mean_interarrival_time, pct_need_second_dose)
 
-    # For now we are going to hard code in the resource capacity levels
+    # Create a random number generator
+    seed = arg_dict['seed'] + rep_num - 1
+    rg = default_rng(seed=seed)
+
+    # Resource capacity levels
     num_greeters = arg_dict['num_greeters']
     num_reg_staff = arg_dict['num_reg_staff']
     num_vaccinators = arg_dict['num_vaccinators']
     num_schedulers = arg_dict['num_schedulers']
 
-    # Hours of operation
+    # Other parameters
     stoptime = arg_dict['stoptime']  # No more arrivals after this time
     quiet = arg_dict['quiet']
     scenario = arg_dict['scenario']
@@ -283,7 +327,7 @@ def simulate(arg_dict):
     clinic = VaccineClinic(env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers)
 
     env.process(
-        run_clinic(env, clinic, mean_interarrival_time, pct_need_second_dose, rg, stoptime=stoptime, quiet=quiet))
+        run_clinic(env, clinic, patient_flow, rg, stoptime=stoptime, quiet=quiet))
     env.run()
 
     # Create output files and basic summary stats
@@ -293,26 +337,51 @@ def simulate(arg_dict):
         output_dir = Path.cwd() / 'output'
     print(output_dir)
 
-    clinic_patient_log_path = output_dir / f'clinic_patient_log_{scenario}.csv'
-    summary_stats_path = output_dir / f'summary_stats_{scenario}.csv'
-    vac_occupancy_df_path = output_dir / f'vac_occupancy_{scenario}.csv'
-    postvac_occupancy_df_path = output_dir / f'postvac_occupancy_{scenario}.csv'
+    # Create paths for the output logs
+    clinic_patient_log_path = output_dir / f'clinic_patient_log_{scenario}_{rep_num}.csv'
+    vac_occupancy_df_path = output_dir / f'vac_occupancy_{scenario}_{rep_num}.csv'
+    postvac_occupancy_df_path = output_dir / f'postvac_occupancy_{scenario}_{rep_num}.csv'
 
+    # Create patient log dataframe and add scenario and rep number cols
     clinic_patient_log_df = pd.DataFrame(clinic.timestamps_list)
+    clinic_patient_log_df['scenario'] = scenario
+    clinic_patient_log_df['rep_num'] = rep_num
+
+    # Reorder cols to get scenario and rep_num first
+    num_cols = len(clinic_patient_log_df.columns)
+    new_col_order = [-2, -1]
+    new_col_order.extend([_ for _ in range(0, num_cols-2)])
+    clinic_patient_log_df = clinic_patient_log_df.iloc[:, new_col_order]
+
+    # Compute durations of interest for patient log
     clinic_patient_log_df = compute_durations(clinic_patient_log_df)
-    clinic_patient_log_df[scenario] = scenario
-    clinic_patient_log_df.to_csv(clinic_patient_log_path, index=False)
 
-    summary_stats_df = clinic_patient_log_df.loc[:, ['wait_for_vaccinator', 'time_in_system']].describe()
-    summary_stats_df.to_csv(summary_stats_path, index=True)
-
+    # Create occupancy log dataframes and add scenario and rep number cols
     vac_occupancy_df = pd.DataFrame(clinic.vac_occupancy_list, columns=['ts', 'occ'])
-    vac_occupancy_df[scenario] = scenario
-    vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
+    vac_occupancy_df['scenario'] = scenario
+    vac_occupancy_df['rep_num'] = scenario
+    num_cols = len(vac_occupancy_df.columns)
+    new_col_order = [-2, -1]
+    new_col_order.extend([_ for _ in range(0, num_cols - 2)])
+    vac_occupancy_df = vac_occupancy_df.iloc[:, new_col_order]
 
     postvac_occupancy_df = pd.DataFrame(clinic.postvac_occupancy_list, columns=['ts', 'occ'])
-    postvac_occupancy_df[scenario] = scenario
+    postvac_occupancy_df['scenario'] = scenario
+    postvac_occupancy_df['rep_num'] = scenario
+    num_cols = len(postvac_occupancy_df.columns)
+    new_col_order = [-2, -1]
+    new_col_order.extend([_ for _ in range(0, num_cols - 2)])
+    postvac_occupancy_df = vac_occupancy_df.iloc[:, new_col_order]
+
+    # Export logs to csv
+    clinic_patient_log_df.to_csv(clinic_patient_log_path, index=False)
+    vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
     postvac_occupancy_df.to_csv(postvac_occupancy_df_path, index=False)
+
+    # Summary stats - keep or move?
+    summary_stats_path = output_dir / f'summary_stats_{scenario}_{rep_num}.csv'
+    summary_stats_df = clinic_patient_log_df.loc[:, ['wait_for_vaccinator', 'time_in_system']].describe()
+    summary_stats_df.to_csv(summary_stats_path, index=True)
 
     # Note simulation end time
     end_time = env.now
@@ -324,7 +393,9 @@ def main():
     args = process_command_line()
     print(args)
 
-    simulate(vars(args))
+    num_reps = args.num_reps
+    for i in range(1, num_reps + 1):
+        simulate(vars(args), i)
 
 
 if __name__ == '__main__':
