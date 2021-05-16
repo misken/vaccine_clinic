@@ -8,7 +8,7 @@ args = {'patient_arrival_rate': 180,
         'scenario': 'base',
         'pct_need_second_dose': 0.50,
         'stoptime': 600,
-        'num_reps': 5,
+        'num_reps': 1,
         'seed': 4470,
         'output_path': 'output',
         'quiet': True}
