@@ -15,109 +15,41 @@ import simpy
 from pathlib import Path
 
 
-# ### Possible improvements
-# 
-# Now that we have a rough first model working, let's think about some possible improvements.
-# There are many as we've taken numerous shortcuts to get this model working.
-# 
-# * Specifying the global sim inputs through configuration files
-# * Getting rid of hard coded processing time distributions
-# * Having ability to choose between pure random walk-in arrivals and scheduled arrivals
-# * Multiple replications and/or steady state analysis
-# * Detailed logging
-# * Statistical summaries based on timestamp data [roughly done]
-# * CLI for running
-# * Animation
-# 
-
-# ## Model 3: The vaccine clinic model - version 0.01
-# 
-# Here's the basic vaccination process we'll model.
-# 
-# Arrival --> Temperature check --> Registration --> Vaccination --> Sched dose 2 (if needed) --> Wait 15 min --> Exit
-
-def process_command_line(argv=None):
-    """
-    Parse command line arguments
-
-    `argv` is a list of arguments, or `None` for ``sys.argv[1:]``.
-    Return a Namespace representing the argument list.
-    """
-
-    # If argv is empty, get the argument list from sys.argv.
-    if argv is None:
-        argv = sys.argv[1:]
-
-    # Create the parser
-    parser = argparse.ArgumentParser(prog='vaccine_clinic_model4',
-                                     description='Run vaccine clinic simulation')
-
-    # Add arguments
-    parser.add_argument(
-        "--config", type=str, default=None,
-        help="Configuration file containing input parameter arguments and values"
-    )
-
-    parser.add_argument("--patient_arrival_rate", default=150, help="patients per hour",
-                        type=float)
-
-    parser.add_argument("--num_greeters", default=2, help="number of greeters",
-                        type=int)
-
-    parser.add_argument("--num_reg_staff", default=2, help="number of registration staff",
-                        type=int)
-
-    parser.add_argument("--num_vaccinators", default=15, help="number of vaccinators",
-                        type=int)
-
-    parser.add_argument("--num_schedulers", default=2, help="number of schedulers",
-                        type=int)
-
-    parser.add_argument("--pct_need_second_dose", default=0.5,
-                        help="percent of patients needing 2nd dose (default = 0.5)",
-                        type=float)
-
-    parser.add_argument("--obs_time", default=15,
-                        help="Time (minutes) patient waits post-vaccination in observation area (default = 15)",
-                        type=float)
-
-    parser.add_argument(
-        "--scenario", type=str, default=datetime.now().strftime("%Y.%m.%d.%H.%M."),
-        help="Appended to output filenames."
-    )
-
-    parser.add_argument("--stoptime", default=600, help="time that simulation stops (default = 600)",
-                        type=float)
-
-    parser.add_argument("--num_reps", default=1, help="number of simulation replications (default = 1)",
-                        type=float)
-
-    parser.add_argument("--seed", default=3, help="random number generator seed (default = 3)",
-                        type=float)
-
-    parser.add_argument(
-        "--output_path", type=str, default="", help="location for output file writing")
-
-    parser.add_argument("--quiet", action='store_true',
-                        help="If True, suppresses output messages (default=False")
-
-    # do the parsing
-    args = parser.parse_args()
-    return args
-
-
-class PatientFlow(object):
-    def __init__(self, mean_interarrival_time, pct_need_second_dose):
-        self.mean_interarrival_time = mean_interarrival_time
-        self.pct_need_second_dose = pct_need_second_dose
-
-
-
-
 class VaccineClinic(object):
-    def __init__(self, env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers):
-        # Simulation environment
+    def __init__(self, env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers,
+                 mean_interarrival_time, pct_need_second_dose,
+                 temp_check_time_mean, temp_check_time_sd,
+                 reg_time_mean,
+                 vaccinate_time_mean, vaccinate_time_sd,
+                 sched_time_mean, sched_time_sd,
+                 obs_time, post_obs_time_mean, rg
+                 ):
+        """
+
+        Parameters
+        ----------
+        env
+        num_greeters
+        num_reg_staff
+        num_vaccinators
+        num_schedulers
+        mean_interarrival_time
+        pct_need_second_dose
+        temp_check_time_mean
+        temp_check_time_sd
+        reg_time_mean
+        vaccinate_time_mean
+        vaccinate_time_sd
+        sched_time_mean
+        sched_time_sd
+        obs_time
+        post_obs_time_mean
+        rg
+        """
+
+        # Simulation environment and random number generator
         self.env = env
+        self.rg = rg
 
         # Create list to hold timestamps dictionaries (one per patient)
         self.timestamps_list = []
@@ -125,36 +57,47 @@ class VaccineClinic(object):
         self.postvac_occupancy_list = [(0.0, 0.0)]
         self.vac_occupancy_list = [(0.0, 0.0)]
 
-        # Create resources
+        # Create SimPy resources
         self.greeter = simpy.Resource(env, num_greeters)
         self.reg_staff = simpy.Resource(env, num_reg_staff)
         self.vaccinator = simpy.Resource(env, num_vaccinators)
         self.scheduler = simpy.Resource(env, num_schedulers)
 
-    # Create process methods - hard coding processing time distributions for now
-    # The patient argument is just a unique integer number
-    def temperature_check(self, rg):
-        yield self.env.timeout(rg.normal(0.25, 0.05))
+        # Initialize the patient flow related attributes
+        self.mean_interarrival_time = mean_interarrival_time
+        self.pct_need_second_dose = pct_need_second_dose
 
-    def registration(self, rg):
-        yield self.env.timeout(rg.exponential(1.0))
+        self.temp_check_time_mean = temp_check_time_mean
+        self.temp_check_time_sd = temp_check_time_sd
+        self.reg_time_mean = reg_time_mean
+        self.vaccinate_time_mean = vaccinate_time_mean
+        self.vaccinate_time_sd = vaccinate_time_sd
+        self.sched_time_mean = sched_time_mean
+        self.sched_time_sd = sched_time_sd
+        self.obs_time = obs_time
+        self.post_obs_time_mean = post_obs_time_mean
 
-    def vaccinate(self, rg):
-        yield self.env.timeout(rg.normal(4.0, 0.5))
+    # Create process methods
+    def temperature_check(self):
+        yield self.env.timeout(self.rg.normal(self.temp_check_time_mean, self.temp_check_time_sd))
 
-    def schedule_dose_2(self, rg):
-        yield self.env.timeout(rg.normal(1.0, 0.10))
+    def registration(self):
+        yield self.env.timeout(self.rg.exponential(self.reg_time_mean))
 
-    # We assume all patients wait at least 15 minutes post-vaccination
-    # Some will choose to wait longer. This is the time beyond 15 minutes
+    def vaccinate(self):
+        yield self.env.timeout(self.rg.normal(self.vaccinate_time_mean, self.vaccinate_time_sd))
+
+    def schedule_dose_2(self):
+        yield self.env.timeout(self.rg.normal(self.sched_time_mean, self.sched_time_sd))
+
+    # We assume all patients wait at least obs_time minutes post-vaccination
+    # Some will choose to wait longer. This is the time beyond obs_time minutes
     # that patients wait.
-    def wait_gt_15(self, rg):
-        yield self.env.timeout(rg.exponential(0.5))
+    def wait_gt_obs_time(self):
+        yield self.env.timeout(self.rg.exponential(self.post_obs_time_mean))
 
 
-#
-
-def get_vaccinated(env, patient, clinic, patient_flow, rg, quiet):
+def get_vaccinated(env, patient, clinic, quiet):
     """Defines the sequence of steps traversed by patients.
 
        Also capture a bunch of timestamps to make it easy to compute various system
@@ -169,14 +112,14 @@ def get_vaccinated(env, patient, clinic, patient_flow, rg, quiet):
         yield request
         # Now that we have a greeter, check temperature. Note time.
         got_greeter_ts = env.now
-        yield env.process(clinic.temperature_check(rg))
+        yield env.process(clinic.temperature_check())
         release_greeter_ts = env.now
 
     # Request reg staff to get registered
     with clinic.reg_staff.request() as request:
         yield request
         got_reg_ts = env.now
-        yield env.process(clinic.registration(rg))
+        yield env.process(clinic.registration())
         release_reg_ts = env.now
 
     # Request clinical staff to get vaccinated
@@ -187,7 +130,7 @@ def get_vaccinated(env, patient, clinic, patient_flow, rg, quiet):
         prev_occ = clinic.vac_occupancy_list[-1][1]
         new_occ = (env.now, prev_occ + 1)
         clinic.vac_occupancy_list.append(new_occ)
-        yield env.process(clinic.vaccinate(rg))
+        yield env.process(clinic.vaccinate())
         release_vaccinator_ts = env.now
         # Update vac occupancy - decrement by 1 - more compact code
         clinic.vac_occupancy_list.append((env.now, clinic.vac_occupancy_list[-1][1] - 1))
@@ -196,23 +139,23 @@ def get_vaccinated(env, patient, clinic, patient_flow, rg, quiet):
         clinic.postvac_occupancy_list.append((env.now, clinic.postvac_occupancy_list[-1][1] + 1))
 
     # Request scheduler to schedule second dose if needed
-    if rg.random() < patient_flow.pct_need_second_dose:
+    if clinic.rg.random() < clinic.pct_need_second_dose:
         with clinic.scheduler.request() as request:
             yield request
             got_scheduler_ts = env.now
-            yield env.process(clinic.schedule_dose_2(rg))
+            yield env.process(clinic.schedule_dose_2())
             release_scheduler_ts = env.now
     else:
         got_scheduler_ts = pd.NA
         release_scheduler_ts = pd.NA
 
-    # Wait at least 15 minutes from time we finished getting vaccinated 
+    # Wait at least obs_time minutes from time we finished getting vaccinated
     post_vac_time = env.now - release_vaccinator_ts
-    if post_vac_time < 15:
+    if post_vac_time < clinic.obs_time:
         # Wait until 15 total minutes post vac
-        yield env.timeout(15 - post_vac_time)
-        # Wait random amount beyond 15 minutes
-        yield env.process(clinic.wait_gt_15(rg))
+        yield env.timeout(clinic.obs_time - post_vac_time)
+        # Wait random amount beyond obs_time minutes
+        yield env.process(clinic.wait_gt_obs_time())
 
         # Update postvac occupancy - decrement by 1
         clinic.postvac_occupancy_list.append((env.now, clinic.postvac_occupancy_list[-1][1] - 1))
@@ -237,24 +180,21 @@ def get_vaccinated(env, patient, clinic, patient_flow, rg, quiet):
     clinic.timestamps_list.append(timestamps)
 
 
-def run_clinic(env, clinic, patient_flow, rg,
-               stoptime=simpy.core.Infinity, max_arrivals=simpy.core.Infinity, quiet=False):
+def run_clinic(env, clinic, stoptime=simpy.core.Infinity, max_arrivals=simpy.core.Infinity, quiet=False):
     """
-    Run the clinic for a specified amount of time.
+    Run the clinic for a specified amount of time or after generating a maximum number of patients.
 
     Parameters
     ----------
-    env
-    clinic
-    patient_flow
-    rg
-    stoptime
-    max_arrivals
-    quiet
+    env : SimPy environment
+    clinic : ``VaccineClinic`` object
+    stoptime : float
+    max_arrivals : int
+    quiet : bool
 
-    Returns
+    Yields
     -------
-
+    Simpy environment timeout
     """
 
     # Create a counter to keep track of number of patients generated and to serve as unique patient id
@@ -263,7 +203,7 @@ def run_clinic(env, clinic, patient_flow, rg,
     # Loop for generating patients
     while env.now < stoptime and patient < max_arrivals:
         # Generate next interarrival time (this will be more complicated later)
-        iat = rg.exponential(patient_flow.mean_interarrival_time)
+        iat = clinic.rg.exponential(clinic.mean_interarrival_time)
 
         # This process will now yield to a 'timeout' event. This process will resume after iat time units.
         yield env.timeout(iat)
@@ -274,7 +214,8 @@ def run_clinic(env, clinic, patient_flow, rg,
         if not quiet:
             print(f"Patient {patient} created at time {env.now}")
 
-        env.process(get_vaccinated(env, patient, clinic, patient_flow, rg, quiet))
+        # Register a get_vaccinated process for the new patient
+        env.process(get_vaccinated(env, patient, clinic, quiet))
 
     print(f"{patient} patients processed.")
 
@@ -298,15 +239,20 @@ def compute_durations(timestamp_df):
 
 
 def simulate(arg_dict, rep_num):
+    """
 
-    patient_arrival_rate = arg_dict['patient_arrival_rate']
-    mean_interarrival_time = 1.0 / (patient_arrival_rate / 60.0)
-    pct_need_second_dose = arg_dict['pct_need_second_dose']
+    Parameters
+    ----------
+    arg_dict : dict whose keys are the input args
+    rep_num : int, simulation replication number
 
-    # Create a PatientFlow object to store patient flow related parameters
-    patient_flow = PatientFlow(mean_interarrival_time, pct_need_second_dose)
+    Returns
+    -------
+    Nothing returned but numerous output files written to ``args_dict[output_path]``
 
-    # Create a random number generator
+    """
+
+    # Create a random number generator for this replication
     seed = arg_dict['seed'] + rep_num - 1
     rg = default_rng(seed=seed)
 
@@ -316,6 +262,21 @@ def simulate(arg_dict, rep_num):
     num_vaccinators = arg_dict['num_vaccinators']
     num_schedulers = arg_dict['num_schedulers']
 
+    # Initialize the patient flow related attributes
+    patient_arrival_rate = arg_dict['patient_arrival_rate']
+    mean_interarrival_time = 1.0 / (patient_arrival_rate / 60.0)
+
+    pct_need_second_dose = arg_dict['pct_need_second_dose']
+    temp_check_time_mean = arg_dict['temp_check_time_mean']
+    temp_check_time_sd = arg_dict['temp_check_time_sd']
+    reg_time_mean = arg_dict['reg_time_mean']
+    vaccinate_time_mean = arg_dict['vaccinate_time_mean']
+    vaccinate_time_sd = arg_dict['vaccinate_time_sd']
+    sched_time_mean = arg_dict['sched_time_mean']
+    sched_time_sd = arg_dict['sched_time_sd']
+    obs_time = arg_dict['obs_time']
+    post_obs_time_mean = arg_dict['post_obs_time_mean']
+
     # Other parameters
     stoptime = arg_dict['stoptime']  # No more arrivals after this time
     quiet = arg_dict['quiet']
@@ -323,11 +284,22 @@ def simulate(arg_dict, rep_num):
 
     # Run the simulation
     env = simpy.Environment()
-    # Create a clinic to simulate
-    clinic = VaccineClinic(env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers)
 
+    # Create a clinic to simulate
+    clinic = VaccineClinic(env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers,
+                           mean_interarrival_time, pct_need_second_dose,
+                           temp_check_time_mean, temp_check_time_sd,
+                           reg_time_mean,
+                           vaccinate_time_mean, vaccinate_time_sd,
+                           sched_time_mean, sched_time_sd,
+                           obs_time, post_obs_time_mean, rg
+                           )
+
+    # Initialize and register the run_clinic generator function
     env.process(
-        run_clinic(env, clinic, patient_flow, rg, stoptime=stoptime, quiet=quiet))
+        run_clinic(env, clinic, stoptime=stoptime, quiet=quiet))
+
+    # Launch the simulation
     env.run()
 
     # Create output files and basic summary stats
@@ -378,15 +350,117 @@ def simulate(arg_dict, rep_num):
     vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
     postvac_occupancy_df.to_csv(postvac_occupancy_df_path, index=False)
 
-    # Summary stats - keep or move?
-    summary_stats_path = output_dir / f'summary_stats_{scenario}_{rep_num}.csv'
-    summary_stats_df = clinic_patient_log_df.loc[:, ['wait_for_vaccinator', 'time_in_system']].describe()
-    summary_stats_df.to_csv(summary_stats_path, index=True)
-
     # Note simulation end time
     end_time = env.now
     print(f"Simulation ended at time {end_time}")
 
+
+def process_command_line(argv=None):
+    """
+    Parse command line arguments
+
+    `argv` is a list of arguments, or `None` for ``sys.argv[1:]``.
+    Return a Namespace representing the argument list.
+    """
+
+    # If argv is empty, get the argument list from sys.argv.
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Create the parser
+    parser = argparse.ArgumentParser(prog='vaccine_clinic_model4',
+                                     description='Run vaccine clinic simulation')
+
+    # Add arguments
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Configuration file containing input parameter arguments and values"
+    )
+
+    parser.add_argument("--patient_arrival_rate", default=150, help="patients per hour",
+                        type=float)
+
+    parser.add_argument("--num_greeters", default=2, help="number of greeters",
+                        type=int)
+
+    parser.add_argument("--num_reg_staff", default=2, help="number of registration staff",
+                        type=int)
+
+    parser.add_argument("--num_vaccinators", default=15, help="number of vaccinators",
+                        type=int)
+
+    parser.add_argument("--num_schedulers", default=2, help="number of schedulers",
+                        type=int)
+
+    parser.add_argument("--pct_need_second_dose", default=0.5,
+                        help="percent of patients needing 2nd dose (default = 0.5)",
+                        type=float)
+
+    parser.add_argument("--temp_check_time_mean", default=0.25,
+                        help="Mean time (mins) for temperature check (default = 0.25)",
+                        type=float)
+
+    parser.add_argument("--temp_check_time_sd", default=0.05,
+                        help="Standard deviation time (mins) for temperature check (default = 0.05)",
+                        type=float)
+
+    parser.add_argument("--reg_time_mean", default=1.0,
+                        help="Mean time (mins) for registration (default = 1.0)",
+                        type=float)
+
+    parser.add_argument("--vaccinate_time_mean", default=4.0,
+                        help="Mean time (mins) for vaccination (default = 4.0)",
+                        type=float)
+
+    parser.add_argument("--vaccinate_time_sd", default=0.5,
+                        help="Standard deviation time (mins) for vaccination (default = 0.5)",
+                        type=float)
+
+    parser.add_argument("--sched_time_mean", default=1.0,
+                        help="Mean time (mins) for scheduling 2nd dose (default = 1.0)",
+                        type=float)
+
+    parser.add_argument("--sched_time_sd", default=1.0,
+                        help="Standard deviation time (mins) for scheduling 2nd dose (default = 0.1)",
+                        type=float)
+
+    parser.add_argument("--obs_time", default=15.0,
+                        help="Time (minutes) patient waits post-vaccination in observation area (default = 15)",
+                        type=float)
+
+    parser.add_argument("--post_obs_time_mean", default=1.0,
+                        help="Time (minutes) patient waits post OBS_TIME in observation area (default = 1.0)",
+                        type=float)
+
+    parser.add_argument(
+        "--scenario", type=str, default=datetime.now().strftime("%Y.%m.%d.%H.%M."),
+        help="Appended to output filenames."
+    )
+
+    parser.add_argument("--stoptime", default=600, help="time that simulation stops (default = 600)",
+                        type=float)
+
+    parser.add_argument("--num_reps", default=1, help="number of simulation replications (default = 1)",
+                        type=int)
+
+    parser.add_argument("--seed", default=3, help="random number generator seed (default = 3)",
+                        type=int)
+
+    parser.add_argument(
+        "--output_path", type=str, default="", help="location for output file writing")
+
+    parser.add_argument("--quiet", action='store_true',
+                        help="If True, suppresses output messages (default=False")
+
+    # do the parsing
+    args = parser.parse_args()
+
+    if args.config is not None:
+        # Read inputs from config file
+        with open(args.config, "r") as fin:
+            args = parser.parse_args(fin.read().split())
+
+    return args
 
 def main():
 
