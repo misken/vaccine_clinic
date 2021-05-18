@@ -4,6 +4,7 @@
 import sys
 import argparse
 from datetime import datetime
+import math
 
 import numpy as np
 import pandas as pd
@@ -306,8 +307,7 @@ def simulate(arg_dict, rep_num):
     if len(arg_dict['output_path']) > 0:
         output_dir = Path.cwd() / arg_dict['output_path']
     else:
-        output_dir = Path.cwd() / 'output'
-    print(output_dir)
+        output_dir = Path.cwd()
 
     # Create paths for the output logs
     clinic_patient_log_path = output_dir / f'clinic_patient_log_{scenario}_{rep_num}.csv'
@@ -347,12 +347,112 @@ def simulate(arg_dict, rep_num):
 
     # Export logs to csv
     clinic_patient_log_df.to_csv(clinic_patient_log_path, index=False)
-    vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
-    postvac_occupancy_df.to_csv(postvac_occupancy_df_path, index=False)
+    #vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
+    #postvac_occupancy_df.to_csv(postvac_occupancy_df_path, index=False)
 
     # Note simulation end time
     end_time = env.now
-    print(f"Simulation ended at time {end_time}")
+    print(f"Simulation replication {rep_num} ended at time {end_time}")
+
+
+def process_sim_output(csvs_path, scenario):
+    """
+
+    Parameters
+    ----------
+    csvs_path : Path object for location of simulation output patient log csv files
+    scenario : str
+
+    Returns
+    -------
+    Dict of dicts
+
+    Keys are:
+
+    'patient_log_rep_stats' --> Contains dataframes from describe on group by rep num. Keys are perf measures.
+    'patient_log_ci' -->        Contains dictionaries with overall stats and CIs. Keys are perf measures.
+    """
+
+    dest_path = csvs_path / f"consolidated_clinic_patient_log_{scenario}.csv"
+
+    sort_keys = ['scenario', 'rep_num']
+
+    # Create empty dict to hold the DataFrames created as we read each csv file
+    dfs = {}
+
+    # Loop over all the csv files
+    for csv_f in csvs_path.glob('clinic_patient_log_*.csv'):
+        # Split the filename off from csv extension. We'll use the filename
+        # (without the extension) as the key in the dfs dict.
+        fstem = csv_f.stem
+
+        # Read the next csv file into a pandas DataFrame and add it to
+        # the dfs dict.
+        df = pd.read_csv(csv_f)
+        dfs[fstem] = df
+
+    # Use pandas concat method to combine the file specific DataFrames into
+    # one big DataFrame.
+    patient_log_df = pd.concat(dfs)
+
+    # Since we didn't try to control the order in which the files were read,
+    # we'll sort the final DataFrame in place by the specified sort keys.
+    patient_log_df.sort_values(sort_keys, inplace=True)
+
+    # Export the final DataFrame to a csv file. Suppress the pandas index.
+    patient_log_df.to_csv(dest_path, index=False)
+
+    # Compute summary statistics for several performance measures
+    patient_log_stats = summarize_patient_log(patient_log_df, scenario)
+
+    # Now delete the individual replication files
+    for csv_f in csvs_path.glob('clinic_patient_log_*.csv'):
+        csv_f.unlink()
+
+    return patient_log_stats
+
+
+def summarize_patient_log(patient_log_df, scenario):
+    """
+
+    Parameters
+    ----------
+    patient_log_df : DataFrame created by process_sim_output
+    scenario : str
+
+    Returns
+    -------
+    Dict of dictionaries - See comments below
+    """
+
+    # Create empty dictionaries to hold computed results
+    patient_log_rep_stats = {}  # Will store dataframes from describe on group by rep num. Keys are perf measures.
+    patient_log_ci = {}         # Will store dictionaries with overall stats and CIs. Keys are perf measures.
+    patient_log_stats = {}      # Container dict returned by this function containing the two previous dicts.
+
+    # Create list of performance measures for looping over
+    performance_measures = ['wait_for_greeter', 'wait_for_reg', 'wait_for_vaccinator',
+                           'wait_for_scheduler', 'time_in_system']
+
+    for pm in performance_measures:
+        # Compute descriptive stats for each replication and store dataframe in dict
+        patient_log_rep_stats[pm] = patient_log_df.groupby(['rep_num'])[pm].describe()
+        # Compute across replication stats
+        n_samples = patient_log_rep_stats[pm]['mean'].count()
+        mean_mean = patient_log_rep_stats[pm]['mean'].mean()
+        sd_mean = patient_log_rep_stats[pm]['mean'].std()
+        ci_95_lower = mean_mean - 1.96 * sd_mean / math.sqrt(n_samples)
+        ci_95_upper = mean_mean + 1.96 * sd_mean / math.sqrt(n_samples)
+        # Store cross replication stats as dict in dict
+        patient_log_ci[pm] = {'n_samples': n_samples, 'mean_mean': mean_mean, 'sd_mean': sd_mean,
+                              'ci_95_lower': ci_95_lower, 'ci_95_upper': ci_95_upper}
+
+    patient_log_stats['scenario'] = scenario
+    patient_log_stats['patient_log_rep_stats'] = patient_log_rep_stats
+    # Convert the final summary stats dict to a DataFrame
+    patient_log_stats['patient_log_ci'] = pd.DataFrame(patient_log_ci)
+
+    return patient_log_stats
 
 
 def process_command_line(argv=None):
@@ -462,14 +562,31 @@ def process_command_line(argv=None):
 
     return args
 
+
 def main():
 
     args = process_command_line()
     print(args)
 
     num_reps = args.num_reps
+    scenario = args.scenario
+
+    if len(args.output_path) > 0:
+        output_dir = Path.cwd() / args.output_path
+    else:
+        output_dir = Path.cwd()
+
+    # Main simulation replication loop
     for i in range(1, num_reps + 1):
         simulate(vars(args), i)
+
+    # Consolidate the patient logs and compute summary stats
+    patient_log_stats = process_sim_output(output_dir, scenario)
+    print(f"\nScenario: {scenario}")
+    pd.set_option("display.precision", 3)
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 120)
+    print(patient_log_stats['patient_log_ci'])
 
 
 if __name__ == '__main__':
