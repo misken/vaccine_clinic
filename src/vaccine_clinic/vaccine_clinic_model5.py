@@ -93,135 +93,131 @@ class VaccineClinic(object):
     def wait_gt_obs_time(self):
         yield self.env.timeout(self.rg.exponential(self.post_obs_time_mean))
 
+    def get_vaccinated(self, patient, quiet):
+        """Defines the sequence of steps traversed by patients.
 
-def get_vaccinated(env, patient, clinic, quiet):
-    """Defines the sequence of steps traversed by patients.
+        Also capture a bunch of timestamps to make it easy to compute various system
+        performance measures such as patient waiting times, queue sizes and resource utilization.
+        """
+        # Patient arrives to clinic - note the arrival time
+        arrival_ts = self.env.now
 
-       Also capture a bunch of timestamps to make it easy to compute various system
-       performance measures such as patient waiting times, queue sizes and resource utilization.
-    """
-    # Patient arrives to clinic - note the arrival time
-    arrival_ts = env.now
-
-    # Request a greeter for temperature check
-    # By using request() in a context manager, we'll automatically release the resource when done
-    with clinic.greeter.request() as request:
-        yield request
-        # Now that we have a greeter, check temperature. Note time.
-        got_greeter_ts = env.now
-        yield env.process(clinic.temperature_check())
-        release_greeter_ts = env.now
-
-    # Request reg staff to get registered
-    with clinic.reg_staff.request() as request:
-        yield request
-        got_reg_ts = env.now
-        yield env.process(clinic.registration())
-        release_reg_ts = env.now
-
-    # Request clinical staff to get vaccinated
-    with clinic.vaccinator.request() as request:
-        if not quiet:
-            print(f"Patient {patient} requests vaccinator at time {env.now}")
-        yield request
-        got_vaccinator_ts = env.now
-        q_time = got_vaccinator_ts - release_reg_ts
-        if not quiet:
-            print(f"Patient {patient} gets vaccinator at time {env.now} (waited {q_time:.1f} minutes)")
-        # Update vac occupancy - increment by 1
-        prev_occ = clinic.vac_occupancy_list[-1][1]
-        new_occ = (env.now, prev_occ + 1)
-        clinic.vac_occupancy_list.append(new_occ)
-        yield env.process(clinic.vaccinate())
-        release_vaccinator_ts = env.now
-        if not quiet:
-            print(f"Patient {patient} releases vaccinator at time {env.now}")
-        # Update vac occupancy - decrement by 1 - more compact code
-        clinic.vac_occupancy_list.append((env.now, clinic.vac_occupancy_list[-1][1] - 1))
-
-        # Update postvac occupancy - increment by 1
-        clinic.postvac_occupancy_list.append((env.now, clinic.postvac_occupancy_list[-1][1] + 1))
-
-    # Request scheduler to schedule second dose if needed
-    if clinic.rg.random() < clinic.pct_need_second_dose:
-        with clinic.scheduler.request() as request:
+        # Request a greeter for temperature check
+        # By using request() in a context manager, we'll automatically release the resource when done
+        with self.greeter.request() as request:
             yield request
-            got_scheduler_ts = env.now
-            yield env.process(clinic.schedule_dose_2())
-            release_scheduler_ts = env.now
-    else:
-        got_scheduler_ts = pd.NA
-        release_scheduler_ts = pd.NA
+            # Now that we have a greeter, check temperature. Note time.
+            got_greeter_ts = self.env.now
+            yield self.env.process(self.temperature_check())
+            release_greeter_ts = self.env.now
 
-    # Wait at least obs_time minutes from time we finished getting vaccinated
-    post_vac_time = env.now - release_vaccinator_ts
-    if post_vac_time < clinic.obs_time:
-        # Wait until 15 total minutes post vac
-        yield env.timeout(clinic.obs_time - post_vac_time)
-        # Wait random amount beyond obs_time minutes
-        yield env.process(clinic.wait_gt_obs_time())
+        # Request reg staff to get registered
+        with self.reg_staff.request() as request:
+            yield request
+            got_reg_ts = self.env.now
+            yield self.env.process(self.registration())
+            release_reg_ts = self.env.now
 
-        # Update postvac occupancy - decrement by 1
-        clinic.postvac_occupancy_list.append((env.now, clinic.postvac_occupancy_list[-1][1] - 1))
+        # Request clinical staff to get vaccinated
+        with self.vaccinator.request() as request:
+            if not quiet:
+                print(f"Patient {patient} requests vaccinator at time {self.env.now}")
+            yield request
+            got_vaccinator_ts = self.env.now
+            q_time = got_vaccinator_ts - release_reg_ts
+            if not quiet:
+                print(f"Patient {patient} gets vaccinator at time {self.env.now} (waited {q_time:.1f} minutes)")
+            # Update vac occupancy - increment by 1
+            prev_occ = self.vac_occupancy_list[-1][1]
+            new_occ = (self.env.now, prev_occ + 1)
+            self.vac_occupancy_list.append(new_occ)
+            yield self.env.process(self.vaccinate())
+            release_vaccinator_ts = self.env.now
+            if not quiet:
+                print(f"Patient {patient} releases vaccinator at time {self.env.now}")
+            # Update vac occupancy - decrement by 1 - more compact code
+            self.vac_occupancy_list.append((self.env.now, self.vac_occupancy_list[-1][1] - 1))
 
-    exit_system_ts = env.now
-    if not quiet:
-        print(f"Patient {patient} exited system at time {env.now}")
+            # Update postvac occupancy - increment by 1
+            self.postvac_occupancy_list.append((self.env.now, self.postvac_occupancy_list[-1][1] + 1))
 
-    # Create dictionary of timestamps
-    timestamps = {'patient_id': patient,
-                  'arrival_ts': arrival_ts,
-                  'got_greeter_ts': got_greeter_ts,
-                  'release_greeter_ts': release_greeter_ts,
-                  'got_reg_ts': got_reg_ts,
-                  'release_reg_ts': release_reg_ts,
-                  'got_vaccinator_ts': got_vaccinator_ts,
-                  'release_vaccinator_ts': release_vaccinator_ts,
-                  'got_scheduler_ts': got_scheduler_ts,
-                  'release_scheduler_ts': release_scheduler_ts,
-                  'exit_system_ts': exit_system_ts}
+        # Request scheduler to schedule second dose if needed
+        if self.rg.random() < self.pct_need_second_dose:
+            with self.scheduler.request() as request:
+                yield request
+                got_scheduler_ts = self.env.now
+                yield self.env.process(self.schedule_dose_2())
+                release_scheduler_ts = self.env.now
+        else:
+            got_scheduler_ts = pd.NA
+            release_scheduler_ts = pd.NA
 
-    clinic.timestamps_list.append(timestamps)
+        # Wait at least obs_time minutes from time we finished getting vaccinated
+        post_vac_time = self.env.now - release_vaccinator_ts
+        if post_vac_time < self.obs_time:
+            # Wait until 15 total minutes post vac
+            yield self.env.timeout(self.obs_time - post_vac_time)
+            # Wait random amount beyond obs_time minutes
+            yield self.env.process(self.wait_gt_obs_time())
 
+            # Update postvac occupancy - decrement by 1
+            self.postvac_occupancy_list.append((self.env.now, self.postvac_occupancy_list[-1][1] - 1))
 
-def run_clinic(env, clinic, stoptime=simpy.core.Infinity, max_arrivals=simpy.core.Infinity, quiet=False):
-    """
-    Run the clinic for a specified amount of time or after generating a maximum number of patients.
-
-    Parameters
-    ----------
-    env : SimPy environment
-    clinic : ``VaccineClinic`` object
-    stoptime : float
-    max_arrivals : int
-    quiet : bool
-
-    Yields
-    -------
-    Simpy environment timeout
-    """
-
-    # Create a counter to keep track of number of patients generated and to serve as unique patient id
-    patient = 0
-
-    # Loop for generating patients
-    while env.now < stoptime and patient < max_arrivals:
-        # Generate next interarrival time (this will be more complicated later)
-        iat = clinic.rg.exponential(clinic.mean_interarrival_time)
-
-        # This process will now yield to a 'timeout' event. This process will resume after iat time units.
-        yield env.timeout(iat)
-
-        # New patient generated = update counter of patients
-        patient += 1
-
+        exit_system_ts = self.env.now
         if not quiet:
-            print(f"Patient {patient} created at time {env.now}")
+            print(f"Patient {patient} exited system at time {self.env.now}")
 
-        # Register a get_vaccinated process for the new patient
-        env.process(get_vaccinated(env, patient, clinic, quiet))
+        # Create dictionary of timestamps
+        timestamps = {'patient_id': patient,
+                      'arrival_ts': arrival_ts,
+                      'got_greeter_ts': got_greeter_ts,
+                      'release_greeter_ts': release_greeter_ts,
+                      'got_reg_ts': got_reg_ts,
+                      'release_reg_ts': release_reg_ts,
+                      'got_vaccinator_ts': got_vaccinator_ts,
+                      'release_vaccinator_ts': release_vaccinator_ts,
+                      'got_scheduler_ts': got_scheduler_ts,
+                      'release_scheduler_ts': release_scheduler_ts,
+                      'exit_system_ts': exit_system_ts}
 
-    print(f"{patient} patients processed.")
+        self.timestamps_list.append(timestamps)
+
+    def run(self, stoptime=simpy.core.Infinity, max_arrivals=simpy.core.Infinity, quiet=False):
+        """
+        Run the clinic for a specified amount of time or after generating a maximum number of patients.
+
+        Parameters
+        ----------
+        stoptime : float
+        max_arrivals : int
+        quiet : bool
+
+        Yields
+        -------
+        Simpy environment timeout
+        """
+
+        # Create a counter to keep track of number of patients generated and to serve as unique patient id
+        patient = 0
+
+        # Loop for generating patients
+        while self.env.now < stoptime and patient < max_arrivals:
+            # Generate next interarrival time (this will be more complicated later)
+            iat = self.rg.exponential(self.mean_interarrival_time)
+
+            # This process will now yield to a 'timeout' event. This process will resume after iat time units.
+            yield self.env.timeout(iat)
+
+            # New patient generated = update counter of patients
+            patient += 1
+
+            if not quiet:
+                print(f"Patient {patient} created at time {self.env.now}")
+
+            # Register a get_vaccinated process for the new patient
+            self.env.process(self.get_vaccinated(patient, quiet))
+
+        print(f"{patient} patients processed.")
 
 
 def compute_durations(timestamp_df):
@@ -301,7 +297,7 @@ def simulate(arg_dict, rep_num):
 
     # Initialize and register the run_clinic generator function
     env.process(
-        run_clinic(env, clinic, stoptime=stoptime, quiet=quiet))
+        clinic.run(stoptime=stoptime, quiet=quiet))
 
     # Launch the simulation
     env.run()
