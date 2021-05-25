@@ -12,9 +12,112 @@ import simpy
 from pathlib import Path
 
 
+class Patient(object):
+    def __init__(self, patient_id, appt_type):
+        """
+
+        Parameters
+        ----------
+        patient_id
+        appt_type
+        """
+        self.patient_id = patient_id
+        self.appt_type = appt_type
+
+    def __str__(self):
+        return self.patient_id
+
+
+class ScheduledPatientGenerator(object):
+    def __init__(self, env, clinic, mean_interappt_time, num_appts_per_block, stoptime, rg, quiet=False):
+        self.env = env
+        self.clinic = clinic
+        self.mean_interappt_time = mean_interappt_time
+        self.num_appts_per_block = num_appts_per_block
+        self.stoptime = stoptime
+        self.rg = rg
+        self.quiet = quiet
+
+        # Start creating walk in patients
+        env.process(self.run())
+
+    def run(self):
+
+        num_patients = 0
+        # Generate first block of patients at time 0
+        # Generate block of patients at this time
+        for p in range(self.num_appts_per_block):
+            # Generate new patient
+            num_patients += 1
+            # Create patient id which is just "s" (for scheduled) followed by number of such patients created.
+            patient_id = f"s{num_patients}"
+            patient = Patient(patient_id, "scheduled")
+
+            if not self.quiet:
+                print(f"Patient {patient_id} created at time {self.env.now}")
+
+        # Loop for generating patients
+        while self.env.now < self.stoptime:
+            # Generate next interarrival time
+            iat = self.mean_interappt_time
+
+            # This process will now yield to a 'timeout' event. This process will resume after iat time units.
+            yield self.env.timeout(iat)
+
+            # Generate block of patients at this time
+            for p in range(self.num_appts_per_block):
+                # Generate new patient
+                num_patients += 1
+                # Create patient id which is just "s" (for scheduled) followed by number of such patients created.
+                patient_id = f"s{num_patients}"
+                patient = Patient(patient_id, "scheduled")
+
+                if not self.quiet:
+                    print(f"Patient {patient_id} created at time {self.env.now}")
+
+                # Register a get_vaccinated process for the new patient
+                self.env.process(self.clinic.get_vaccinated(patient, self.quiet))
+
+
+class WalkinPatientGenerator(object):
+    def __init__(self, env, clinic, mean_interarrival_time, stoptime, rg, quiet=False):
+        self.env = env
+        self.clinic = clinic
+        self.mean_interarrival_time = mean_interarrival_time
+        self.stoptime = stoptime
+        self.rg = rg
+        self.quiet = quiet
+
+        # Start creating walk in patients
+        env.process(self.run())
+
+    def run(self):
+
+        num_patients = 0
+        # Loop for generating patients
+        while self.env.now < self.stoptime:
+            # Generate next interarrival time
+            iat = self.rg.exponential(self.mean_interarrival_time)
+
+            # This process will now yield to a 'timeout' event. This process will resume after iat time units.
+            yield self.env.timeout(iat)
+
+            # Generate new patient
+            num_patients += 1
+            # Create patient id which is just "w" (for walkin) followed by number of such patients created.
+            patient_id = f"w{num_patients}"
+            patient = Patient(patient_id, "walk_in")
+
+            if not self.quiet:
+                print(f"Patient {patient_id} created at time {self.env.now}")
+
+            # Register a get_vaccinated process for the new patient
+            self.env.process(self.clinic.get_vaccinated(patient, self.quiet))
+
+
 class VaccineClinic(object):
     def __init__(self, env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers,
-                 mean_interarrival_time, pct_need_second_dose,
+                 pct_need_second_dose,
                  temp_check_time_mean, temp_check_time_sd,
                  reg_time_mean,
                  vaccinate_time_mean, vaccinate_time_sd,
@@ -25,8 +128,8 @@ class VaccineClinic(object):
         Primary class that encapsulates clinic resources and patient flow logic.
 
         The detailed patient flow logic is now in in get_vaccinated() method of this class. Also,
-        the run_clinic() function is now a run() method in this class. The only patient information
-        that gets passed in to any class methods is the patient id (int).
+        the run_clinic() function is now a run() method in this class. Patient objects are now
+        passed in to some methods to enable modelling of multiple patient types.
 
         Parameters
         ----------
@@ -35,7 +138,6 @@ class VaccineClinic(object):
         num_reg_staff
         num_vaccinators
         num_schedulers
-        mean_interarrival_time
         pct_need_second_dose
         temp_check_time_mean
         temp_check_time_sd
@@ -66,7 +168,6 @@ class VaccineClinic(object):
         self.scheduler = simpy.Resource(env, num_schedulers)
 
         # Initialize the patient flow related attributes
-        self.mean_interarrival_time = mean_interarrival_time
         self.pct_need_second_dose = pct_need_second_dose
 
         self.temp_check_time_mean = temp_check_time_mean
@@ -79,7 +180,7 @@ class VaccineClinic(object):
         self.obs_time = obs_time
         self.post_obs_time_mean = post_obs_time_mean
 
-    # Create process methods
+    # Create process duration methods
     def temperature_check(self):
         yield self.env.timeout(self.rg.normal(self.temp_check_time_mean, self.temp_check_time_sd))
 
@@ -99,7 +200,17 @@ class VaccineClinic(object):
         yield self.env.timeout(self.rg.exponential(self.post_obs_time_mean))
 
     def get_vaccinated(self, patient, quiet):
-        """Defines the sequence of steps traversed by patients.
+        """
+        Defines the sequence of steps traversed by patients.
+
+        Parameters
+        ----------
+        patient : Patient object
+        quiet : bool
+
+        Returns
+        -------
+        None
 
         Also capture a bunch of timestamps to make it easy to compute various system
         performance measures such as patient waiting times, queue sizes and resource utilization.
@@ -168,12 +279,12 @@ class VaccineClinic(object):
             # Update postvac occupancy - decrement by 1
             self.postvac_occupancy_list.append((self.env.now, self.postvac_occupancy_list[-1][1] - 1))
 
+        # All done, ready to exit system
         exit_system_ts = self.env.now
-        if not quiet:
-            print(f"Patient {patient} exited system at time {self.env.now}")
 
         # Create dictionary of timestamps
-        timestamps = {'patient_id': patient,
+        timestamps = {'patient_id': patient.patient_id,
+                      'appt_type': patient.appt_type,
                       'arrival_ts': arrival_ts,
                       'got_greeter_ts': got_greeter_ts,
                       'release_greeter_ts': release_greeter_ts,
@@ -187,42 +298,8 @@ class VaccineClinic(object):
 
         self.timestamps_list.append(timestamps)
 
-    def run(self, stoptime=simpy.core.Infinity, max_arrivals=simpy.core.Infinity, quiet=False):
-        """
-        Run the clinic for a specified amount of time or after generating a maximum number of patients.
-
-        Parameters
-        ----------
-        stoptime : float
-        max_arrivals : int
-        quiet : bool
-
-        Yields
-        -------
-        Simpy environment timeout
-        """
-
-        # Create a counter to keep track of number of patients generated and to serve as unique patient id
-        patient = 0
-
-        # Loop for generating patients
-        while self.env.now < stoptime and patient < max_arrivals:
-            # Generate next interarrival time (this will be more complicated later)
-            iat = self.rg.exponential(self.mean_interarrival_time)
-
-            # This process will now yield to a 'timeout' event. This process will resume after iat time units.
-            yield self.env.timeout(iat)
-
-            # New patient generated = update counter of patients
-            patient += 1
-
-            if not quiet:
-                print(f"Patient {patient} created at time {self.env.now}")
-
-            # Register a get_vaccinated process for the new patient
-            self.env.process(self.get_vaccinated(patient, quiet))
-
-        print(f"{patient} patients processed.")
+        if not quiet:
+            print(f"Patient {patient} exited system at time {self.env.now}")
 
 
 def compute_durations(timestamp_df):
@@ -230,14 +307,14 @@ def compute_durations(timestamp_df):
 
     timestamp_df['wait_for_greeter'] = timestamp_df.loc[:, 'got_greeter_ts'] - timestamp_df.loc[:, 'arrival_ts']
     timestamp_df['wait_for_reg'] = timestamp_df.loc[:, 'got_reg_ts'] - timestamp_df.loc[:, 'release_greeter_ts']
-    timestamp_df['wait_for_vaccinator'] = timestamp_df.loc[:, 'got_vaccinator_ts'] - timestamp_df.loc[:,
-                                                                                     'release_reg_ts']
-    timestamp_df['vaccination_time'] = timestamp_df.loc[:, 'release_vaccinator_ts'] - timestamp_df.loc[:,
-                                                                                      'got_vaccinator_ts']
-    timestamp_df['wait_for_scheduler'] = timestamp_df.loc[:, 'got_scheduler_ts'] - timestamp_df.loc[:,
-                                                                                   'release_vaccinator_ts']
-    timestamp_df['post_vacc_time'] = timestamp_df.loc[:, 'exit_system_ts'] - timestamp_df.loc[:,
-                                                                             'release_vaccinator_ts']
+    timestamp_df['wait_for_vaccinator'] = \
+        timestamp_df.loc[:, 'got_vaccinator_ts'] - timestamp_df.loc[:, 'release_reg_ts']
+    timestamp_df['vaccination_time'] = \
+        timestamp_df.loc[:, 'release_vaccinator_ts'] - timestamp_df.loc[:, 'got_vaccinator_ts']
+    timestamp_df['wait_for_scheduler'] = \
+        timestamp_df.loc[:, 'got_scheduler_ts'] - timestamp_df.loc[:, 'release_vaccinator_ts']
+    timestamp_df['post_vacc_time'] = \
+        timestamp_df.loc[:, 'exit_system_ts'] - timestamp_df.loc[:, 'release_vaccinator_ts']
     timestamp_df['time_in_system'] = timestamp_df.loc[:, 'exit_system_ts'] - timestamp_df.loc[:, 'arrival_ts']
 
     return timestamp_df
@@ -292,7 +369,7 @@ def simulate(arg_dict, rep_num):
 
     # Create a clinic to simulate
     clinic = VaccineClinic(env, num_greeters, num_reg_staff, num_vaccinators, num_schedulers,
-                           mean_interarrival_time, pct_need_second_dose,
+                           pct_need_second_dose,
                            temp_check_time_mean, temp_check_time_sd,
                            reg_time_mean,
                            vaccinate_time_mean, vaccinate_time_sd,
@@ -300,9 +377,9 @@ def simulate(arg_dict, rep_num):
                            obs_time, post_obs_time_mean, rg
                            )
 
-    # Initialize and register the run_clinic generator function
-    env.process(
-        clinic.run(stoptime=stoptime, quiet=quiet))
+    # Initialize and register (happens in __init__) the patient arrival generators
+    walkin_gen = WalkinPatientGenerator(env, clinic, mean_interarrival_time, stoptime, rg, quiet=quiet)
+    scheduled_gen = ScheduledPatientGenerator(env, clinic, 10.0, 5, stoptime, rg, quiet=quiet)
 
     # Launch the simulation
     env.run()
@@ -326,7 +403,7 @@ def simulate(arg_dict, rep_num):
     # Reorder cols to get scenario and rep_num first
     num_cols = len(clinic_patient_log_df.columns)
     new_col_order = [-2, -1]
-    new_col_order.extend([_ for _ in range(0, num_cols-2)])
+    new_col_order.extend([_ for _ in range(0, num_cols - 2)])
     clinic_patient_log_df = clinic_patient_log_df.iloc[:, new_col_order]
 
     # Compute durations of interest for patient log
@@ -351,8 +428,8 @@ def simulate(arg_dict, rep_num):
 
     # Export logs to csv
     clinic_patient_log_df.to_csv(clinic_patient_log_path, index=False)
-    vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
-    postvac_occupancy_df.to_csv(postvac_occupancy_df_path, index=False)
+    # vac_occupancy_df.to_csv(vac_occupancy_df_path, index=False)
+    # postvac_occupancy_df.to_csv(postvac_occupancy_df_path, index=False)
 
     # Note simulation end time
     end_time = env.now
@@ -431,12 +508,12 @@ def summarize_patient_log(patient_log_df, scenario):
 
     # Create empty dictionaries to hold computed results
     patient_log_rep_stats = {}  # Will store dataframes from describe on group by rep num. Keys are perf measures.
-    patient_log_ci = {}         # Will store dictionaries with overall stats and CIs. Keys are perf measures.
-    patient_log_stats = {}      # Container dict returned by this function containing the two previous dicts.
+    patient_log_ci = {}  # Will store dictionaries with overall stats and CIs. Keys are perf measures.
+    patient_log_stats = {}  # Container dict returned by this function containing the two previous dicts.
 
     # Create list of performance measures for looping over
     performance_measures = ['wait_for_greeter', 'wait_for_reg', 'wait_for_vaccinator',
-                           'wait_for_scheduler', 'time_in_system']
+                            'wait_for_scheduler', 'time_in_system']
 
     for pm in performance_measures:
         # Compute descriptive stats for each replication and store dataframe in dict
@@ -564,7 +641,6 @@ def process_command_line():
 
 
 def main():
-
     args = process_command_line()
     print(args)
 
@@ -592,5 +668,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
